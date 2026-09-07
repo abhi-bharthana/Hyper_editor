@@ -6,39 +6,71 @@ export default function Player() {
   const { isPlaying, playheadPosition, togglePlay } = useEditorStore();
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Engine se frame fetch karne ka function
   const fetchAndRenderFrame = async () => {
     try {
-      // 🔥 FIX: Tauri v2 ke liye http://hyper.localhost format use kiya
       const response = await fetch('http://hyper.localhost/video-stream/frame_latest');
-      const buffer = await response.arrayBuffer();
+      if (!response.ok) return;
       
+      const buffer = await response.arrayBuffer();
       const canvas = canvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      // Rust se 1280x720 ka raw RGBA buffer aa raha hai
-      const imgData = new ImageData(new Uint8ClampedArray(buffer), 1280, 720);
+      // 1. Buffer size se video ki original resolution pata karo (Dynamic Check)
+      const totalBytes = buffer.byteLength;
+      let srcWidth = 1280;
+      let srcHeight = 720;
+
+      if (totalBytes === 1920 * 1080 * 4) {
+        srcWidth = 1920; srcHeight = 1080; // 1080p Video
+      } else if (totalBytes === 3840 * 2160 * 4) {
+        srcWidth = 3840; srcHeight = 2160; // 4K Video
+      } else if (totalBytes === 2560 * 1440 * 4) {
+        srcWidth = 2560; srcHeight = 1440; // 2K Video
+      } else if (totalBytes !== 1280 * 720 * 4) {
+        // Agar koi aur size hai toh 16:9 aspect ratio ke hisaab se guess karo
+        srcHeight = Math.round(Math.sqrt((totalBytes / 4) / (16/9)));
+        srcWidth = Math.round(srcHeight * (16/9));
+      }
+
+      // 2. Original size ka ImageData banao
+      const imgData = new ImageData(new Uint8ClampedArray(buffer), srcWidth, srcHeight);
       
-      // Paint directly to Canvas (Super fast)
-      ctx.putImageData(imgData, 0, 0);
+      // 3. Hardware-accelerated Bitmap bana kar canvas par scale karo! (Super Fast)
+      const bitmap = await createImageBitmap(imgData);
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
     } catch (error) {
-      console.error("Failed to load frame from Rust Engine:", error);
+      console.error("Frame render error:", error);
     }
   };
 
-  const handlePlayPause = () => {
-    togglePlay();
+  const handlePlayPause = async () => {
     if (!isPlaying) {
-      invoke('play_video');
-      fetchAndRenderFrame(); // Play dabate hi Rust se frame maango
+      togglePlay(); 
+      await invoke('play_video');
     } else {
-      invoke('pause_video');
+      togglePlay(); 
+      await invoke('pause_video');
     }
   };
 
-  // Jab bhi app load ho, ek initial frame manga lo
+  useEffect(() => {
+    let active = true;
+    const playLoop = async () => {
+      if (!active || !isPlaying) return; 
+      
+      await fetchAndRenderFrame();
+      requestAnimationFrame(playLoop); 
+    };
+
+    if (isPlaying) {
+      playLoop();
+    }
+    return () => { active = false; };
+  }, [isPlaying]);
+
   useEffect(() => {
     fetchAndRenderFrame();
   }, []);
@@ -60,10 +92,6 @@ export default function Player() {
           {isPlaying ? '⏸' : '▶'}
         </button>
         <button className="text-neutral-400 hover:text-white transition transform active:scale-95">⏭</button>
-        <div className="h-4 w-px bg-neutral-700/60 mx-1"></div>
-        <span className="text-xs font-mono font-medium text-blue-400 tracking-wider">
-          00:00:{(Math.floor(playheadPosition / 60)).toString().padStart(2, '0')}:{(Math.floor(playheadPosition % 60)).toString().padStart(2, '0')}
-        </span>
       </div>
     </div>
   );

@@ -1,38 +1,53 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// Apne naye modules ko import karo
 mod cmd;
 mod engine;
 mod models;
 
 use models::state::VideoEngineState;
+use tauri::Manager;
 
 fn main() {
-    // Engine state initialize karo
     let app_state = VideoEngineState::new();
 
     tauri::Builder::default()
         .manage(app_state)
         .plugin(tauri_plugin_opener::init()) 
-        .plugin(tauri_plugin_dialog::init()) // 🔥 YE LINE NAYI HAI: Dialog Plugin On!
-        .register_uri_scheme_protocol("hyper", |_app, _request| {
-            // Dummy Blue Frame Generator
-            let width = 1280;
-            let height = 720;
-            let mut frame_data = vec![0u8; width * height * 4];
+        .plugin(tauri_plugin_dialog::init()) 
+        .register_uri_scheme_protocol("hyper", |app, _request| {
             
-            for i in (0..frame_data.len()).step_by(4) {
-                frame_data[i] = 13;       
-                frame_data[i+1] = 13;     
-                frame_data[i+2] = 20;     
-                frame_data[i+3] = 255;    
+            // 🔥 FIX: Added .app_handle() before .state()
+            let state = app.app_handle().state::<VideoEngineState>();
+            let mut extracted_frame = None;
+
+            {
+                let decoder_lock = state.decoder.lock().unwrap();
+                if let Some(decoder) = decoder_lock.as_ref() {
+                    extracted_frame = decoder.decode_next_frame();
+                }
             }
+
+            let final_frame = match extracted_frame {
+                Some(frame_data) => frame_data,
+                None => {
+                    let width = 1280;
+                    let height = 720;
+                    let mut fallback = vec![0u8; width * height * 4];
+                    for i in (0..fallback.len()).step_by(4) {
+                        fallback[i] = 13;       
+                        fallback[i+1] = 13;     
+                        fallback[i+2] = 20;     
+                        fallback[i+3] = 255;    
+                    }
+                    fallback
+                }
+            };
 
             tauri::http::Response::builder()
                 .header("Access-Control-Allow-Origin", "*")
                 .header("Content-Type", "application/octet-stream")
                 .status(200)
-                .body(frame_data)
+                .body(final_frame)
                 .unwrap()
         })
         .invoke_handler(tauri::generate_handler![
